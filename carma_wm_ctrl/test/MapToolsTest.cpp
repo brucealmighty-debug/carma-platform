@@ -25,6 +25,7 @@
 #include <lanelet2_io/io_handlers/Writer.h>
 #include <lanelet2_extension/traffic_rules/CarmaUSTrafficRules.h>
 #include <lanelet2_extension/utility/query.h>
+#include <lanelet2_extension/utility/utilities.h>
 #include <lanelet2_extension/projection/local_frame_projector.h>
 #include <lanelet2_extension/io/autoware_osm_parser.h>
 #include <carma_wm/CARMAWorldModel.h>
@@ -47,14 +48,15 @@ namespace carma_wm_ctrl
  * neighbors until either it forms a loop, it reaches an intersection where there are multiple possible directions to
  * travel, or the neighbor relationship changes. Since the update is done by assigning the bounds, routing should still
  * work, but not every edge case is covered. If the map is not a loop, it is likely there might be orphaned lanelets.
- * 
+ *
  * See the UNIT TEST ARGUMENTS section below to configure this unit test.
  * The unit test is normally disabled. To enable it, removed the "DISABLED_" from the test name.
  * To run the unit test call
  *   catkin_make run_tests_carma_wm_ctrl_gtest_map-tools
- * 
+ *
  * This unit test will output the new map as <map_name>.osm.combined.osm
- * Additionally, two routing graphs will be created in the test/resource folder one before the changes routing_graph.viz and one after final_routing_graph.viz.
+ * Additionally, two routing graphs will be created in the test/resource folder one before the changes routing_graph.viz
+ * and one after final_routing_graph.viz.
  *
  */
 TEST(MapTools, DISABLED_combine_lanes)  // Remove DISABLED_ to enable unit test
@@ -70,7 +72,7 @@ TEST(MapTools, DISABLED_combine_lanes)  // Remove DISABLED_ to enable unit test
   // UNIT TEST ARGUMENTS
   ///////////
 
-  // File to process. Path is relatice to test folder
+  // File to process. Path is relative to test folder
   std::string file = "resource/ATEF_pretty.osm";
   // Id of lanelet to start combing from
   lanelet::Id starting_id = 113;
@@ -86,7 +88,7 @@ TEST(MapTools, DISABLED_combine_lanes)  // Remove DISABLED_ to enable unit test
   int projector_type = 0;
   std::string target_frame;
   lanelet::ErrorMessages load_errors;
-  // Parse geo reference info from the origional lanelet map (.osm)
+  // Parse geo reference info from the original lanelet map (.osm)
   lanelet::io_handlers::AutowareOsmParser::parseMapParams(file, &projector_type, &target_frame);
 
   lanelet::projection::LocalFrameProjector local_projector(target_frame.c_str());
@@ -212,7 +214,189 @@ TEST(MapTools, DISABLED_combine_lanes)  // Remove DISABLED_ to enable unit test
   }
   else
   {
-    std::cerr << "Map written without erros to: " << new_file << std::endl;
+    std::cerr << "Map written without errors to: " << new_file << std::endl;
+  }
+  for (auto msg : write_errors)
+  {
+    std::cerr << "Write Error: " << msg << std::endl;
+  }
+
+  // Copy over georeference tag
+  pugi::xml_document doc;
+  auto result = doc.load_file(new_file.c_str());
+  if (!result)
+  {
+    std::cerr << "Failed to update georeference tag you may need to manually" << std::endl;
+  }
+  auto osm_node = doc.child("osm");
+  auto first_osm_child = osm_node.first_child();
+  auto geo_ref_node = osm_node.insert_child_before("geoReference", first_osm_child);
+  geo_ref_node.text().set(target_frame.c_str());
+  doc.save_file(new_file.c_str());
+}
+
+TEST(MapTools, DISABLED_split_lanes)  // Remove DISABLED_ to enable unit test
+{
+  ///////////
+  // UNIT TEST ARGUMENTS
+  ///////////
+
+  // File to process. Path is relatice to test folder
+  std::string file = "resource/ATEF_pretty.osm";
+  // Id of lanelet to start combing from
+  lanelet::Id starting_id = 113;
+  // The restrictions on the lane centerline
+  lanelet::ControlLinePassType pass_type = lanelet::ControlLinePassType::BOTH;
+  // List of participants allowed to pass the centerline from the left
+  std::vector<std::string> left_participants = { lanelet::Participants::Vehicle };
+  // List of participants allowed to pass the centerline from the right
+  std::vector<std::string> right_participants = { lanelet::Participants::Vehicle }
+
+  ///////////
+  // START OF LOGIC
+  ///////////
+
+  // Write new map to file
+  int projector_type = 0;
+  std::string target_frame;
+  lanelet::ErrorMessages load_errors;
+  // Parse geo reference info from the original lanelet map (.osm)
+  lanelet::io_handlers::AutowareOsmParser::parseMapParams(file, &projector_type, &target_frame);
+
+  lanelet::projection::LocalFrameProjector local_projector(target_frame.c_str());
+
+  lanelet::LaneletMapPtr map = lanelet::load(file, local_projector, &load_errors);
+
+  if (map->laneletLayer.size() == 0)
+  {
+    FAIL() << "Input map does not contain any lanelets";
+  }
+
+  // Overrite centerlines to ensure there is an equal number of points in the centerline and bounds
+  lanelet::utils::overwriteLaneletsCenterline(map, true);
+
+  carma_wm::CARMAWorldModel cwm;
+  cwm.setMap(map);
+  auto routing_graph = cwm.getMapRoutingGraph();
+  routing_graph->exportGraphViz("resource/routing_graph.viz");
+
+  std::unordered_set<lanelet::Id> visited_lanelets;
+  std::unordered_set<lanelet::Id> lanelets_for_removal;
+
+  // The algorithm would be better off assuming a loop.
+  // Given a lanelet identify left/right relations
+  // Get next lanelet based on following relation.
+  lanelet::Lanelet current_lanelet;
+  try
+  {
+    current_lanelet = map->laneletLayer.get(starting_id);  // TODO for now assume the first lanelet is the base lanelet
+  }
+  catch (const lanelet::NoSuchPrimitiveError& e)
+  {
+    FAIL() << "The specified starting lanelet Id of " << starting_id << " does not exist in the provided map.";
+  }
+
+  while (visited_lanelets.find(current_lanelet.id()) == visited_lanelets.end())
+  {
+    visited_lanelets.emplace(current_lanelet.id());  // Add current lanelet to set of explored lanelets
+
+    lanelet::LineString3d centerline = current_lanelet.centerline3d();
+    lanelet::RegulatoryElementPtrs regs = current_lanelet.regulatoryElements();
+
+    lanelet::Lanelet left_ll(lanelet::utils::getId(), current_lanelet.leftBound3d(), centerline,
+                             current_lanelet.attributes(), current_lanelet.regulatoryElements());
+
+    lanelet::Lanelet right_ll(lanelet::utils::getId(), current_lanelet.leftBound3d(), centerline,
+                              current_lanelet.attributes(), current_lanelet.regulatoryElements());
+
+    // Remove right control line from left lanelet
+    auto left_control_lines = left_ll.regulatoryElementsAs<lanelet::PassingControlLine>();
+    
+    for (auto reg : left_control_lines) {
+      if (reg->find(left_ll.rightBound3d().id())) {
+        if (!left_ll.removeRegulatoryElement(reg)) {
+          throw std::invalid_argument("Failed to remove regulatory element from lanelet");
+        }
+      }
+    }
+
+    // Remove left control line from right lanelet
+    auto right_control_lines = right_ll.regulatoryElementsAs<lanelet::PassingControlLine>();
+    
+    for (auto reg : right_control_lines) {
+      if (reg->find(right_ll.leftBound3d().id())) {
+        if (!right_ll.removeRegulatoryElement(reg)) {
+          throw std::invalid_argument("Failed to remove regulatory element from lanelet");
+        }
+      }
+    }
+
+    // Add a passing control line for the centerline and apply to both lanelets
+    std::shared_ptr<PassingControlLine> control_line_ptr(new PassingControlLine(
+        PassingControlLine::buildData(lanelet::utils::getId(), { centerline }, left_participants, right_participants)));
+
+    left_ll.addRegulatoryElement(control_line_ptr);
+    right_ll.addRegulatoryElement(control_line_ptr);
+
+    // Iterate over all regulatory elements in the map. If they refer to the initial lanelet then replace them with a reference to both lanelets
+    // TODO waiting on advice from lanelet2 maintainers on best practice for element linking
+
+
+    // Get next lanelet
+    auto following_set = routing_graph->following(current_lanelet, false);
+    if (following_set.size() > 1)
+    {
+      std::cerr << "Cannot combine lanelets when there are multiple followers. Your map is not a single loop. Ending "
+                   "update and saving current map state."
+                << std::endl;
+      break;
+    }
+    else if (following_set.size() == 1)
+    {
+      auto lanelet = following_set[0];
+      current_lanelet = map->laneletLayer.get(lanelet.id());
+    }
+  }
+
+  // Build new map from modified data
+  std::vector<lanelet::Lanelet> new_lanelets;
+
+  // Iterate over all lanelets and add only those not in the excluded set to the new map set.
+  for (auto lanelet : map->laneletLayer)
+  {
+    if (lanelets_for_removal.find(lanelet.id()) != lanelets_for_removal.end())
+    {
+      continue;
+    }
+    lanelet::Lanelet mutable_ll = map->laneletLayer.get(lanelet.id());
+    new_lanelets.emplace_back(mutable_ll);
+  }
+
+  std::vector<lanelet::Area> areas;
+  for (auto area : map->areaLayer)
+  {
+    lanelet::Area mutable_area = map->areaLayer.get(area.id());
+    areas.emplace_back(mutable_area);
+  }
+
+  auto new_map = lanelet::utils::createMap(new_lanelets, areas);
+
+  auto new_routing_graph = lanelet::routing::RoutingGraph::build(*new_map, **(cwm.getTrafficRules()));
+  new_routing_graph->exportGraphViz("resource/final_routing_graph.viz");
+
+  // Write new map to file
+  std::string new_file = file + ".combined.osm";
+  lanelet::ErrorMessages write_errors;
+
+  lanelet::write(new_file, *new_map, local_projector, &write_errors);
+
+  if (write_errors.size() > 0)
+  {
+    std::cerr << "Errors occured while writing the map! Output file located at " << new_file << std::endl;
+  }
+  else
+  {
+    std::cerr << "Map written without errors to: " << new_file << std::endl;
   }
   for (auto msg : write_errors)
   {
