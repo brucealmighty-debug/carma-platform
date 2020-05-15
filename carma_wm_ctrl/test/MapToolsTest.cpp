@@ -114,7 +114,7 @@ TEST(MapTools, DISABLED_combine_lanes)  // Remove DISABLED_ to enable unit test
   lanelet::Lanelet current_lanelet;
   try
   {
-    current_lanelet = map->laneletLayer.get(starting_id);  // TODO for now assume the first lanelet is the base lanelet
+    current_lanelet = map->laneletLayer.get(starting_id); 
   }
   catch (const lanelet::NoSuchPrimitiveError& e)
   {
@@ -235,21 +235,75 @@ TEST(MapTools, DISABLED_combine_lanes)  // Remove DISABLED_ to enable unit test
   doc.save_file(new_file.c_str());
 }
 
-TEST(MapTools, DISABLED_split_lanes)  // Remove DISABLED_ to enable unit test
+// Visitor class which builds a new parameter map that has replaced the specified lanelet id with the provided
+// lanelet replacements
+class ReplaceLaneletParameterVisitor : public lanelet::RuleParameterVisitor
+{
+public:
+  explicit ReplaceLaneletParameterVisitor(lanelet::RuleParameterMap& output_map, lanelet::Id target_id,
+                                          std::vector<lanelet::Lanelet> replacements, lanelet::LaneletMapPtr ll_map)
+    : output_map_(output_map), target_id_(target_id), ll_map_(ll_map), replacements_(replacements)
+  {
+  }
+
+  void operator()(const lanelet::ConstWeakLanelet& wll) override
+  {
+    if (wll.expired())
+    {  // NOLINT
+      return;
+    }
+    lanelet::ConstLanelet llt(wll.lock());
+    if (llt.id() == target_id_)  // If this is the lanelet we with to replace then replace it
+    {
+      if (output_map_.find(role) != output_map_.end())
+      {
+        for (auto ll : replacements_)
+          output_map_[role].push_back(ll);
+      }
+      else
+      {
+        auto variant_vector = lanelet::utils::transform(
+            replacements_, [](lanelet::Lanelet ll) -> lanelet::RuleParameter { return ll; });
+        output_map_.insert({ role, variant_vector });
+      }
+    }
+    else  // If not then copy this lanelet to our output
+    {
+      lanelet::Lanelet mutable_ll = ll_map_->laneletLayer.get(llt.id());
+      if (output_map_.find(role) != output_map_.end())
+      {
+        output_map_[role].push_back(mutable_ll);
+      }
+      else
+      {
+        output_map_.insert({ role, { mutable_ll } });
+      }
+    }
+  }
+
+  lanelet::RuleParameterMap& output_map_;
+
+private:
+  lanelet::Id target_id_;
+  lanelet::LaneletMapPtr ll_map_;
+  std::vector<lanelet::Lanelet> replacements_;
+};
+
+TEST(MapTools, split_lanes)  // Remove DISABLED_ to enable unit test
 {
   ///////////
   // UNIT TEST ARGUMENTS
   ///////////
 
   // File to process. Path is relatice to test folder
-  std::string file = "resource/ATEF_pretty.osm";
+  std::string file = "/workspaces/carma_ws/carma/src/carma-platform/carma_wm_ctrl/test/resource/SummitPoint_Pretty.osm";
   // Id of lanelet to start combing from
-  lanelet::Id starting_id = 113;
+  lanelet::Id starting_id = 100;
   // List of participants allowed to pass the centerline from the left
   std::vector<std::string> left_participants = { lanelet::Participants::Vehicle };
   // List of participants allowed to pass the centerline from the right
   std::vector<std::string> right_participants = { lanelet::Participants::Vehicle };
-  // Default road marking. Normally this should be consistent with the left/right participants, 
+  // Default road marking. Normally this should be consistent with the left/right participants,
   // but if you wish to decouple the road marking from regulation that will still work.
   // Line Marking Type
   std::string type_string = lanelet::AttributeValueString::LineThin;
@@ -282,23 +336,19 @@ TEST(MapTools, DISABLED_split_lanes)  // Remove DISABLED_ to enable unit test
   carma_wm::CARMAWorldModel cwm;
   cwm.setMap(map);
   auto routing_graph = cwm.getMapRoutingGraph();
-  routing_graph->exportGraphViz("resource/routing_graph.viz");
+  routing_graph->exportGraphViz("/workspaces/carma_ws/carma/src/carma-platform/carma_wm_ctrl/test/resource/split_lanes_starting_routing_graph.viz"); // Export the routing graph for debugging
 
   std::unordered_set<lanelet::Id> visited_lanelets;
   std::unordered_set<lanelet::Id> lanelets_for_removal;
-  std::unordered_set<lanelet::Id> regulations_for_removal;
 
   std::vector<lanelet::Lanelet> lanelets_to_add;
   std::vector<lanelet::RegulatoryElement> regulations_to_add;
 
-
-  // The algorithm would be better off assuming a loop.
-  // Given a lanelet identify left/right relations
-  // Get next lanelet based on following relation.
+  // Starting with the specified lanelet we will iterate over the 
   lanelet::Lanelet current_lanelet;
   try
   {
-    current_lanelet = map->laneletLayer.get(starting_id);  // TODO for now assume the first lanelet is the base lanelet
+    current_lanelet = map->laneletLayer.get(starting_id);
   }
   catch (const lanelet::NoSuchPrimitiveError& e)
   {
@@ -308,80 +358,59 @@ TEST(MapTools, DISABLED_split_lanes)  // Remove DISABLED_ to enable unit test
   while (visited_lanelets.find(current_lanelet.id()) == visited_lanelets.end())
   {
     visited_lanelets.emplace(current_lanelet.id());  // Add current lanelet to set of explored lanelets
-
+    std::cerr << "1 " << std::endl;
     // Create deep copy of centerline
-    lanelet::LineString3d centerline(lanelet::utils::getId()); // New ID
-    if (current_lanelet.centerline3d().inverted()) { // Apply inversion
+    lanelet::LineString3d centerline(lanelet::utils::getId());  // New ID
+    if (current_lanelet.centerline3d().inverted())
+    {  // Apply inversion
       centerline = centerline.invert();
     }
-    for (auto point : current_lanelet.centerline3d().basicLineString()) { // Copy points
+    for (auto point : current_lanelet.centerline3d().basicLineString())
+    {  // Copy points
       centerline.push_back(lanelet::Point3d(lanelet::utils::getId(), point));
     }
+
+    std::cerr << "2" << std::endl;
 
     // Assign user specified attributes to centerline
     centerline.attributes()[lanelet::AttributeName::Type] = type_string;
     centerline.attributes()[lanelet::AttributeName::Subtype] = sub_type_string;
-   
+
     // Build new lanelets
     lanelet::Lanelet left_ll(lanelet::utils::getId(), current_lanelet.leftBound3d(), centerline,
                              current_lanelet.attributes());
 
-    lanelet::Lanelet right_ll(lanelet::utils::getId(), current_lanelet.leftBound3d(), centerline,
+    lanelet::Lanelet right_ll(lanelet::utils::getId(), centerline, current_lanelet.rightBound3d(),
                               current_lanelet.attributes());
 
-    // TODO reconsider this logic. 
-    // // Remove right control line from left lanelet
-    // auto left_control_lines = left_ll.regulatoryElementsAs<lanelet::PassingControlLine>();
-    
-    // for (auto reg : left_control_lines) {
-    //   if (reg->find<lanelet::ConstLineString3d>(left_ll.rightBound3d().id())) {
-    //     if (!left_ll.removeRegulatoryElement(reg)) {
-    //       throw std::invalid_argument("Failed to remove regulatory element from lanelet");
-    //     }
-    //   }
-    // }
-
-    // // Remove left control line from right lanelet
-    // auto right_control_lines = right_ll.regulatoryElementsAs<lanelet::PassingControlLine>();
-    
-    // for (auto reg : right_control_lines) {
-    //   if (reg->find<lanelet::ConstLineString3d>(right_ll.leftBound3d().id())) {
-    //     if (!right_ll.removeRegulatoryElement(reg)) {
-    //       throw std::invalid_argument("Failed to remove regulatory element from lanelet");
-    //     }
-    //   }
-    // }
-
+    std::cerr << "3" << std::endl;
     // Add a passing control line for the centerline and apply to both lanelets
-    std::shared_ptr<lanelet::PassingControlLine> control_line_ptr(new lanelet::PassingControlLine(
-        lanelet::PassingControlLine::buildData(lanelet::utils::getId(), { centerline }, left_participants, right_participants)));
+    std::shared_ptr<lanelet::PassingControlLine> control_line_ptr(
+        new lanelet::PassingControlLine(lanelet::PassingControlLine::buildData(lanelet::utils::getId(), { centerline },
+                                                                               left_participants, right_participants)));
 
     left_ll.addRegulatoryElement(control_line_ptr);
     right_ll.addRegulatoryElement(control_line_ptr);
 
-    // TODO here
-    // How to add the passing control lines we had previously?
+    std::cerr << "4" << std::endl;
     // Find all references to old lanelet
-    lanelet::utils::query::findReferences();
+    //lanelet::utils::query::References rf = lanelet::utils::query::findReferences(current_lanelet, map);
+    auto reg_elements = map->regulatoryElementLayer.findUsages(current_lanelet);
+    std::cerr << "5" << std::endl;
+    // Add all regulatory elements that reference the old lanelet to the two split lanelets
+    for (auto reg : reg_elements)
+    {
+      lanelet::RuleParameterMap output_map;
+      ReplaceLaneletParameterVisitor rpv(output_map, current_lanelet.id(), { left_ll, right_ll }, map);
+      reg->applyVisitor(rpv);
 
-
-
-    // Iterate over all regulatory elements in the map.
-    // If they refer to the initial lanelet then replace them with a new regulatory element that references to both lanelets
-    // TODO we need to first make sure that the initial passing control lines
-    for (auto reg : map->regulatoryElementLayer) {
-      // Check if current regulation references old lanelet
-      if (reg->find<lanelet::ConstLanelet>(current_lanelet.id())) {
-        // If Yes
-        // -- Then mark regulation for removal and remake with new lanelets. Remember to remove it from the old lanelet
-        for (auto param : reg->getParameters()) {
-          auto parameter = std::get<1>(param);
-        }
-      }
-      // If No then continue
+      std::cerr << "Rule Name: " << reg->getRuleName() << " id: " << reg->id() << std::endl;
+      auto new_reg = lanelet::RegulatoryElementFactory::create(reg->getRuleName(), reg->id(), output_map, reg->attributes());
+      left_ll.addRegulatoryElement(new_reg);
+      right_ll.addRegulatoryElement(new_reg);
     }
-    // TODO waiting on advice from lanelet2 maintainers on best practice for element linking
 
+    std::cerr << "6" << std::endl;
 
     // Get next lanelet
     auto following_set = routing_graph->following(current_lanelet, false);
@@ -397,8 +426,11 @@ TEST(MapTools, DISABLED_split_lanes)  // Remove DISABLED_ to enable unit test
       auto lanelet = following_set[0];
       current_lanelet = map->laneletLayer.get(lanelet.id());
     }
+
+    std::cerr << "7" << std::endl;
   }
 
+  std::cerr << "8" << std::endl;
   // Build new map from modified data
   std::vector<lanelet::Lanelet> new_lanelets;
 
@@ -413,6 +445,8 @@ TEST(MapTools, DISABLED_split_lanes)  // Remove DISABLED_ to enable unit test
     new_lanelets.emplace_back(mutable_ll);
   }
 
+  std::cerr << "9" << std::endl;
+
   std::vector<lanelet::Area> areas;
   for (auto area : map->areaLayer)
   {
@@ -420,13 +454,17 @@ TEST(MapTools, DISABLED_split_lanes)  // Remove DISABLED_ to enable unit test
     areas.emplace_back(mutable_area);
   }
 
+  std::cerr << "10" << std::endl;
+
   auto new_map = lanelet::utils::createMap(new_lanelets, areas);
 
+  std::cerr << "11" << std::endl;
   auto new_routing_graph = lanelet::routing::RoutingGraph::build(*new_map, **(cwm.getTrafficRules()));
-  new_routing_graph->exportGraphViz("resource/final_routing_graph.viz");
+  new_routing_graph->exportGraphViz("/workspaces/carma_ws/carma/src/carma-platform/carma_wm_ctrl/test/resource/split_lanes_final_routing_graph.viz");
 
+  std::cerr << "12" << std::endl;
   // Write new map to file
-  std::string new_file = file + ".combined.osm";
+  std::string new_file = file + ".split.osm";
   lanelet::ErrorMessages write_errors;
 
   lanelet::write(new_file, *new_map, local_projector, &write_errors);
@@ -443,6 +481,7 @@ TEST(MapTools, DISABLED_split_lanes)  // Remove DISABLED_ to enable unit test
   {
     std::cerr << "Write Error: " << msg << std::endl;
   }
+  std::cerr << "13" << std::endl;
 
   // Copy over georeference tag
   pugi::xml_document doc;
@@ -456,6 +495,7 @@ TEST(MapTools, DISABLED_split_lanes)  // Remove DISABLED_ to enable unit test
   auto geo_ref_node = osm_node.insert_child_before("geoReference", first_osm_child);
   geo_ref_node.text().set(target_frame.c_str());
   doc.save_file(new_file.c_str());
-}
+  std::cerr << "Done" << std::endl;
+}  // namespace carma_wm_ctrl
 
 }  // namespace carma_wm_ctrl
