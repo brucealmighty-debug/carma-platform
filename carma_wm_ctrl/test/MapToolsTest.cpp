@@ -245,12 +245,16 @@ TEST(MapTools, DISABLED_split_lanes)  // Remove DISABLED_ to enable unit test
   std::string file = "resource/ATEF_pretty.osm";
   // Id of lanelet to start combing from
   lanelet::Id starting_id = 113;
-  // The restrictions on the lane centerline
-  lanelet::ControlLinePassType pass_type = lanelet::ControlLinePassType::BOTH;
   // List of participants allowed to pass the centerline from the left
   std::vector<std::string> left_participants = { lanelet::Participants::Vehicle };
   // List of participants allowed to pass the centerline from the right
-  std::vector<std::string> right_participants = { lanelet::Participants::Vehicle }
+  std::vector<std::string> right_participants = { lanelet::Participants::Vehicle };
+  // Default road marking. Normally this should be consistent with the left/right participants, 
+  // but if you wish to decouple the road marking from regulation that will still work.
+  // Line Marking Type
+  std::string type_string = lanelet::AttributeValueString::LineThin;
+  // Line Marking SubType
+  std::string sub_type_string = lanelet::AttributeValueString::Dashed;
 
   ///////////
   // START OF LOGIC
@@ -282,6 +286,11 @@ TEST(MapTools, DISABLED_split_lanes)  // Remove DISABLED_ to enable unit test
 
   std::unordered_set<lanelet::Id> visited_lanelets;
   std::unordered_set<lanelet::Id> lanelets_for_removal;
+  std::unordered_set<lanelet::Id> regulations_for_removal;
+
+  std::vector<lanelet::Lanelet> lanelets_to_add;
+  std::vector<lanelet::RegulatoryElement> regulations_to_add;
+
 
   // The algorithm would be better off assuming a loop.
   // Given a lanelet identify left/right relations
@@ -300,45 +309,77 @@ TEST(MapTools, DISABLED_split_lanes)  // Remove DISABLED_ to enable unit test
   {
     visited_lanelets.emplace(current_lanelet.id());  // Add current lanelet to set of explored lanelets
 
-    lanelet::LineString3d centerline = current_lanelet.centerline3d();
-    lanelet::RegulatoryElementPtrs regs = current_lanelet.regulatoryElements();
+    // Create deep copy of centerline
+    lanelet::LineString3d centerline(lanelet::utils::getId()); // New ID
+    if (current_lanelet.centerline3d().inverted()) { // Apply inversion
+      centerline = centerline.invert();
+    }
+    for (auto point : current_lanelet.centerline3d().basicLineString()) { // Copy points
+      centerline.push_back(lanelet::Point3d(lanelet::utils::getId(), point));
+    }
 
+    // Assign user specified attributes to centerline
+    centerline.attributes()[lanelet::AttributeName::Type] = type_string;
+    centerline.attributes()[lanelet::AttributeName::Subtype] = sub_type_string;
+   
+    // Build new lanelets
     lanelet::Lanelet left_ll(lanelet::utils::getId(), current_lanelet.leftBound3d(), centerline,
-                             current_lanelet.attributes(), current_lanelet.regulatoryElements());
+                             current_lanelet.attributes());
 
     lanelet::Lanelet right_ll(lanelet::utils::getId(), current_lanelet.leftBound3d(), centerline,
-                              current_lanelet.attributes(), current_lanelet.regulatoryElements());
+                              current_lanelet.attributes());
 
-    // Remove right control line from left lanelet
-    auto left_control_lines = left_ll.regulatoryElementsAs<lanelet::PassingControlLine>();
+    // TODO reconsider this logic. 
+    // // Remove right control line from left lanelet
+    // auto left_control_lines = left_ll.regulatoryElementsAs<lanelet::PassingControlLine>();
     
-    for (auto reg : left_control_lines) {
-      if (reg->find(left_ll.rightBound3d().id())) {
-        if (!left_ll.removeRegulatoryElement(reg)) {
-          throw std::invalid_argument("Failed to remove regulatory element from lanelet");
-        }
-      }
-    }
+    // for (auto reg : left_control_lines) {
+    //   if (reg->find<lanelet::ConstLineString3d>(left_ll.rightBound3d().id())) {
+    //     if (!left_ll.removeRegulatoryElement(reg)) {
+    //       throw std::invalid_argument("Failed to remove regulatory element from lanelet");
+    //     }
+    //   }
+    // }
 
-    // Remove left control line from right lanelet
-    auto right_control_lines = right_ll.regulatoryElementsAs<lanelet::PassingControlLine>();
+    // // Remove left control line from right lanelet
+    // auto right_control_lines = right_ll.regulatoryElementsAs<lanelet::PassingControlLine>();
     
-    for (auto reg : right_control_lines) {
-      if (reg->find(right_ll.leftBound3d().id())) {
-        if (!right_ll.removeRegulatoryElement(reg)) {
-          throw std::invalid_argument("Failed to remove regulatory element from lanelet");
-        }
-      }
-    }
+    // for (auto reg : right_control_lines) {
+    //   if (reg->find<lanelet::ConstLineString3d>(right_ll.leftBound3d().id())) {
+    //     if (!right_ll.removeRegulatoryElement(reg)) {
+    //       throw std::invalid_argument("Failed to remove regulatory element from lanelet");
+    //     }
+    //   }
+    // }
 
     // Add a passing control line for the centerline and apply to both lanelets
-    std::shared_ptr<PassingControlLine> control_line_ptr(new PassingControlLine(
-        PassingControlLine::buildData(lanelet::utils::getId(), { centerline }, left_participants, right_participants)));
+    std::shared_ptr<lanelet::PassingControlLine> control_line_ptr(new lanelet::PassingControlLine(
+        lanelet::PassingControlLine::buildData(lanelet::utils::getId(), { centerline }, left_participants, right_participants)));
 
     left_ll.addRegulatoryElement(control_line_ptr);
     right_ll.addRegulatoryElement(control_line_ptr);
 
-    // Iterate over all regulatory elements in the map. If they refer to the initial lanelet then replace them with a reference to both lanelets
+    // TODO here
+    // How to add the passing control lines we had previously?
+    // Find all references to old lanelet
+    lanelet::utils::query::findReferences();
+
+
+
+    // Iterate over all regulatory elements in the map.
+    // If they refer to the initial lanelet then replace them with a new regulatory element that references to both lanelets
+    // TODO we need to first make sure that the initial passing control lines
+    for (auto reg : map->regulatoryElementLayer) {
+      // Check if current regulation references old lanelet
+      if (reg->find<lanelet::ConstLanelet>(current_lanelet.id())) {
+        // If Yes
+        // -- Then mark regulation for removal and remake with new lanelets. Remember to remove it from the old lanelet
+        for (auto param : reg->getParameters()) {
+          auto parameter = std::get<1>(param);
+        }
+      }
+      // If No then continue
+    }
     // TODO waiting on advice from lanelet2 maintainers on best practice for element linking
 
 
