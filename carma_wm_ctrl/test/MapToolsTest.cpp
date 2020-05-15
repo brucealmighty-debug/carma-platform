@@ -296,7 +296,7 @@ TEST(MapTools, split_lanes)  // Remove DISABLED_ to enable unit test
   ///////////
 
   // File to process. Path is relatice to test folder
-  std::string file = "/workspaces/carma_ws/carma/src/carma-platform/carma_wm_ctrl/test/resource/SummitPoint_Pretty.osm";
+  std::string file = "/workspaces/carma_ws/carma/src/carma-platform/carma_wm_ctrl/test/resource/SummitPoint_Pretty_fixed.osm";
   // Id of lanelet to start combing from
   lanelet::Id starting_id = 100;
   // List of participants allowed to pass the centerline from the left
@@ -341,7 +341,7 @@ TEST(MapTools, split_lanes)  // Remove DISABLED_ to enable unit test
   std::unordered_set<lanelet::Id> visited_lanelets;
   std::unordered_set<lanelet::Id> lanelets_for_removal;
 
-  std::vector<lanelet::Lanelet> lanelets_to_add;
+  std::vector<lanelet::Lanelet> new_lanelets;
   std::vector<lanelet::RegulatoryElement> regulations_to_add;
 
   // Starting with the specified lanelet we will iterate over the 
@@ -358,6 +358,8 @@ TEST(MapTools, split_lanes)  // Remove DISABLED_ to enable unit test
   while (visited_lanelets.find(current_lanelet.id()) == visited_lanelets.end())
   {
     visited_lanelets.emplace(current_lanelet.id());  // Add current lanelet to set of explored lanelets
+    lanelets_for_removal.emplace(current_lanelet.id()); // Any lanelet we visit gets replaced and should be removed 
+
     std::cerr << "1 " << std::endl;
     // Create deep copy of centerline
     lanelet::LineString3d centerline(lanelet::utils::getId());  // New ID
@@ -412,6 +414,9 @@ TEST(MapTools, split_lanes)  // Remove DISABLED_ to enable unit test
 
     std::cerr << "6" << std::endl;
 
+    new_lanelets.push_back(left_ll);
+    new_lanelets.push_back(right_ll);
+
     // Get next lanelet
     auto following_set = routing_graph->following(current_lanelet, false);
     if (following_set.size() > 1)
@@ -432,8 +437,6 @@ TEST(MapTools, split_lanes)  // Remove DISABLED_ to enable unit test
 
   std::cerr << "8" << std::endl;
   // Build new map from modified data
-  std::vector<lanelet::Lanelet> new_lanelets;
-
   // Iterate over all lanelets and add only those not in the excluded set to the new map set.
   for (auto lanelet : map->laneletLayer)
   {
