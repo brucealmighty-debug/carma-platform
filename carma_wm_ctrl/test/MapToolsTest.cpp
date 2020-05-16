@@ -406,8 +406,8 @@ TEST(MapTools, split_lanes)  // Remove DISABLED_ to enable unit test
       ReplaceLaneletParameterVisitor rpv(output_map, current_lanelet.id(), { left_ll, right_ll }, map);
       reg->applyVisitor(rpv);
 
-      std::cerr << "Rule Name: " << reg->getRuleName() << " id: " << reg->id() << std::endl;
-      auto new_reg = lanelet::RegulatoryElementFactory::create(reg->getRuleName(), reg->id(), output_map, reg->attributes());
+      std::cerr << "Rule Name: " << reg->attribute(lanelet::AttributeName::Subtype).value() << " id: " << reg->id() << std::endl;
+      auto new_reg = lanelet::RegulatoryElementFactory::create(reg->attribute(lanelet::AttributeName::Subtype).value(), reg->id(), output_map, reg->attributes());
       left_ll.addRegulatoryElement(new_reg);
       right_ll.addRegulatoryElement(new_reg);
     }
